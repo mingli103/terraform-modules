@@ -1,0 +1,126 @@
+name: CI/CD Pipeline
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+        inputs:
+            version_type:
+                description: "Version bump type"
+                required: true
+                default: "patch"
+                type: choice
+                options:
+                    - patch
+                    - minor
+                    - major
+
+jobs:
+    test:
+        name: Run Tests
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24"
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v3
+              with:
+                  terraform_version: "1.8.0"
+
+            - name: Start LocalStack
+              run: |
+                  docker-compose up -d localstack
+                  # Wait for LocalStack to be ready
+                  timeout 60 bash -c 'until curl -s http://localhost:4566/_localstack/health > /dev/null; do sleep 2; done'
+
+            - name: Run basic tests
+              run: |
+                  cd common_tags/test
+                  go mod download
+                  go test -v -timeout 30m -run TestModule
+
+            - name: Run AWS resource tests
+              run: |
+                  cd common_tags/test
+                  go test -v -timeout 30m -run TestModuleWithAWSResources
+
+            - name: Stop LocalStack
+              if: always()
+              run: |
+                  docker-compose down
+
+    version-and-tag:
+        name: Version and Tag
+        needs: test
+        runs-on: ubuntu-latest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Get current version
+              id: current_version
+              run: |
+                  # Get the latest tag for common_tags module
+                  LATEST_TAG=$(git tag -l "common_tags/v*" | sort -V | tail -1)
+                  if [ -z "$LATEST_TAG" ]; then
+                    echo "version=0.0.0" >> $GITHUB_OUTPUT
+                    echo "tag=common_tags/v0.0.0" >> $GITHUB_OUTPUT
+                  else
+                    VERSION=${LATEST_TAG#common_tags/v}
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                    echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Bump version
+              id: bump_version
+              run: |
+                  CURRENT_VERSION="${{ steps.current_version.outputs.version }}"
+                  VERSION_TYPE="${{ github.event.inputs.version_type || 'patch' }}"
+
+                  # Split version into parts
+                  IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+                  case $VERSION_TYPE in
+                    major)
+                      MAJOR=$((MAJOR + 1))
+                      MINOR=0
+                      PATCH=0
+                      ;;
+                    minor)
+                      MINOR=$((MINOR + 1))
+                      PATCH=0
+                      ;;
+                    patch)
+                      PATCH=$((PATCH + 1))
+                      ;;
+                  esac
+
+                  NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+                  NEW_TAG="common_tags/v$NEW_VERSION"
+
+                  echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+                  echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+                  echo "Bumping from $CURRENT_VERSION to $NEW_VERSION"
+
+            - name: Create and push tag
+              run: |
+                  NEW_TAG="${{ steps.bump_version.outputs.tag }}"
+                  git config --local user.email "action@github.com"
+                  git config --local user.name "GitHub Action"
+                  git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+                  git push origin "$NEW_TAG"
+                  echo "Created and pushed tag: $NEW_TAG"
