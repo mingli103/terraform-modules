@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  localstack:
+    container_name: terraform-modules-localstack
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566" # LocalStack Gateway
+      - "4510-4559:4510-4559" # External services port range
+    environment:
+      - DEBUG=1
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SERVICES=s3,dynamodb,lambda,iam,sts,cloudformation,apigateway,cloudwatch,firehose,kinesis,route53,redshift,secretsmanager,ses,sns,sqs,ssm,stepfunctions,ec2
+      - DEFAULT_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=my-access-key
+      - AWS_SECRET_ACCESS_KEY=my-secret-key
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./localstack-data:/var/lib/localstack"
+    networks:
+      - terraform-modules-network
+
+networks:
+  terraform-modules-network:
+    driver: bridge
